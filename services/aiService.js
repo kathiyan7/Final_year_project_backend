@@ -167,7 +167,8 @@ For each scene provide:
       "duration": 30,
       "narration": "what the narrator says - engaging and clear",
       "visualDescription": "what should be shown on screen",
-      "visualType": "title" | "diagram" | "concept" | "animation" | "summary"
+      "visualType": "diagram" | "concept" | "summary",
+      "stableDiffusionPrompt": "Detailed prompt for Stable Diffusion to generate a clean, text-free, diagrammatic or flowchart visualization of this scene's concept."
     }
   ]
 }
@@ -231,7 +232,8 @@ Respond with JSON in this format:
       "duration": seconds,
       "narration": "text",
       "visualDescription": "description",
-      "visualType": "title|concept|diagram|animation|summary"
+      "visualType": "diagram|concept|summary",
+      "stableDiffusionPrompt": "Detailed prompt for Stable Diffusion to generate a clean, text-free, diagrammatic or flowchart visualization of this scene's concept."
     }
   ]
 }
@@ -266,6 +268,45 @@ Respond ONLY with valid JSON.`;
     }
   }
 
+  /**
+   * Find a semantically matching topic from existing topics
+   */
+  async findMatchingTopic(userTopic, existingTopics) {
+    console.log('🔍 Checking for semantic matches...');
+
+    if (!this.genAI || existingTopics.length === 0) {
+      return null;
+    }
+
+    try {
+      // Chunk topics to avoid token limits if necessary, but for now assuming reasonable size
+      const prompt = `I have a list of existing educational video topics:
+${JSON.stringify(existingTopics)}
+
+User requested: "${userTopic}"
+
+Determine if the user's request is semantically equivalent to any existing topic (e.g., "Maths" == "Mathematics", "AI" == "Artificial Intelligence").
+If a match is found, respond with the EXACT string of the existing topic from the list.
+If no match is found, respond with "null".
+Respond ONLY with the topic string or "null".`;
+
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text().trim().replace(/^"|"$/g, ''); // Remove quotes if present
+
+      if (text !== 'null' && existingTopics.includes(text)) {
+        console.log(`✅ Semantic match found: "${userTopic}" -> "${text}"`);
+        return text;
+      }
+
+      return null;
+
+    } catch (error) {
+      console.error('❌ Semantic check error:', error.message);
+      return null;
+    }
+  }
+
   // ============================================
   // SIMULATION FUNCTIONS (Fallback when no API key)
   // ============================================
@@ -296,7 +337,7 @@ Respond ONLY with valid JSON.`;
     console.log('ℹ️  Using simulated analysis (no API key)');
     const words = content.split(' ');
     const sentences = content.split('.').filter(s => s.trim().length > 20);
-    
+
     return {
       topics: ['Main Topic', 'Supporting Concepts', 'Applications'],
       keyPoints: sentences.slice(0, 5).map(s => s.trim()),
@@ -322,8 +363,9 @@ Respond ONLY with valid JSON.`;
           id: idx + 2,
           duration: 45,
           narration: `Let's understand ${point}. This concept is crucial for grasping the fundamentals and will help you apply this knowledge effectively.`,
-          visualDescription: `Diagram or infographic showing ${point} with clear visual elements and annotations`,
-          visualType: idx % 2 === 0 ? 'diagram' : 'concept'
+          visualDescription: `Diagram showing ${point}`,
+          visualType: 'diagram',
+          stableDiffusionPrompt: `A clear flow chart diagrammatic representation of: ${point}. Educative flowchart, structured diagram, mind map, clean lines, high quality, abstract nodes and connections. No text.`
         })),
         {
           id: 7,
@@ -348,7 +390,8 @@ Respond ONLY with valid JSON.`;
         duration: 30,
         narration: sentence.trim(),
         visualDescription: `Visual representation illustrating: ${sentence.substring(0, 50)}...`,
-        visualType: idx === 0 ? 'title' : (idx === sentences.length - 1 ? 'summary' : 'concept')
+        visualType: 'diagram',
+        stableDiffusionPrompt: `A clear flow chart diagrammatic representation illustrating ${sentence.substring(0, 50)}. Educative flowchart, structured diagram, mind map. No text.`
       })),
       totalDuration: Math.min(sentences.length, 6) * 30
     };

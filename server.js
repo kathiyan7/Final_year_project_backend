@@ -14,20 +14,13 @@ const ttsService = require('./services/ttsService');
 const videoService = require('./services/videoService');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5005;
 
-// ============================================
-// MIDDLEWARE SETUP
-// ============================================
-app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001'],
-  credentials: true,
-  exposedHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length']
-}));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Request logging
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -105,7 +98,10 @@ function calculateCost(script, hasImages = false, hasAudio = false) {
   let cost = 0;
   const estimatedTokens = JSON.stringify(script).length / 4;
   cost += (estimatedTokens / 1000) * 0.002;
-  if (hasImages) cost += script.scenes.length * 0.040;
+  if (hasImages) {
+    cost += script.scenes.length * 0.040; // Base image cost
+    cost += script.scenes.length * 0.20;  // Stable Video Diffusion cost
+  }
   if (hasAudio) {
     const totalChars = script.scenes.reduce((sum, s) => sum + s.narration.length, 0);
     cost += (totalChars / 1000) * 0.30;
@@ -118,8 +114,8 @@ function calculateCost(script, hasImages = false, hasAudio = false) {
 // ============================================
 
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     message: 'Server is running!',
     timestamp: new Date().toISOString(),
     aiEnabled: !!process.env.GOOGLE_GEMINI_API_KEY,
@@ -137,11 +133,11 @@ app.get('/api/health', (req, res) => {
 // ============================================
 app.post('/api/generate/topic', async (req, res) => {
   const startTime = Date.now();
-  
+
   try {
     console.log('\n🎬 ===== VIDEO GENERATION STARTED =====');
     console.log('📝 Topic:', req.body.topic);
-    
+
     const { topic } = req.body;
 
     if (!topic) {
@@ -154,6 +150,54 @@ app.post('/api/generate/topic', async (req, res) => {
 
     if (topic.length > 200) {
       return res.status(400).json({ error: 'Topic too long (max 200 characters)' });
+    }
+
+    // Check for existing video
+    if (mongoose.connection.readyState === 1) {
+      // 1. Try case-insensitive exact match first (fastest)
+      let existingVideo = await Video.findOne({
+        originalInput: { $regex: new RegExp(`^${topic}$`, 'i') },
+        status: 'completed'
+      });
+
+      // 2. If no exact match, try semantic match
+      if (!existingVideo) {
+        console.log('🤔 No exact match found, checking semantically...');
+        const recentVideos = await Video.find({ status: 'completed' })
+          .sort({ createdAt: -1 })
+          .limit(50)
+          .select('originalInput');
+
+        const existingTopics = recentVideos.map(v => v.originalInput);
+        const matchedTopic = await aiService.findMatchingTopic(topic, existingTopics);
+
+        if (matchedTopic) {
+          existingVideo = await Video.findOne({ originalInput: matchedTopic, status: 'completed' });
+        }
+      }
+
+      if (existingVideo) {
+        console.log(`✨ Found existing video for topic: "${topic}" -> "${existingVideo.originalInput}"`);
+        return res.json({
+          success: true,
+          data: {
+            topic: existingVideo.originalInput,
+            videoUrl: existingVideo.videoUrl,
+            videoPath: existingVideo.videoPath,
+            script: existingVideo.script,
+            duration: existingVideo.duration,
+            thumbnail: existingVideo.thumbnailUrl,
+            visuals: existingVideo.visuals,
+            metadata: {
+              ...existingVideo.metadata,
+              createdAt: existingVideo.createdAt,
+              videoId: existingVideo._id,
+              cached: true,
+              originalQuery: topic
+            }
+          }
+        });
+      }
     }
 
     // Step 1: Research topic
@@ -209,7 +253,7 @@ app.post('/api/generate/topic', async (req, res) => {
           metadata: {
             researchSources: [],
             generatedAt: new Date(),
-            aiModel: process.env.GOOGLE_GEMINI_API_KEY ? 'gemini-1.5-flash' : 'simulated',
+            aiModel: process.env.GOOGLE_GEMINI_API_KEY ? 'Script: Gemini | Images: SD Core | Video: SVD' : 'simulated',
             processingTime: processingTime,
             estimatedCost: estimatedCost,
             fileSize: videoResult.size,
@@ -262,8 +306,8 @@ app.post('/api/generate/topic', async (req, res) => {
     console.error('\n❌ ===== VIDEO GENERATION FAILED =====');
     console.error('Error:', error.message);
     console.error('Stack:', error.stack);
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: 'Failed to generate video',
       message: error.message,
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -276,11 +320,11 @@ app.post('/api/generate/topic', async (req, res) => {
 // ============================================
 app.post('/api/generate/content', async (req, res) => {
   const startTime = Date.now();
-  
+
   try {
     console.log('\n🎬 ===== CONTENT VIDEO GENERATION STARTED =====');
     console.log('📝 Content length:', req.body.content?.length, 'characters');
-    
+
     const { content } = req.body;
 
     if (!content) {
@@ -340,7 +384,7 @@ app.post('/api/generate/content', async (req, res) => {
           duration: duration,
           metadata: {
             generatedAt: new Date(),
-            aiModel: process.env.GOOGLE_GEMINI_API_KEY ? 'gemini-1.5-flash' : 'simulated',
+            aiModel: process.env.GOOGLE_GEMINI_API_KEY ? 'Script: Gemini | Images: SD Core | Video: SVD' : 'simulated',
             processingTime: processingTime,
             estimatedCost: estimatedCost,
             fileSize: videoResult.size,
@@ -385,8 +429,8 @@ app.post('/api/generate/content', async (req, res) => {
   } catch (error) {
     console.error('\n❌ ===== CONTENT VIDEO FAILED =====');
     console.error('Error:', error.message);
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: 'Failed to generate video from content',
       message: error.message
     });
@@ -403,11 +447,11 @@ app.use('/videos', express.static(path.join(__dirname, 'output/videos')));
 // Stream video with range support (for HTML5 video player)
 app.get('/api/videos/stream/:videoId', (req, res) => {
   const videoPath = path.join(__dirname, 'output/videos', `${req.params.videoId}.mp4`);
-  
+
   console.log('📺 Streaming video request:', req.params.videoId);
   console.log('📁 Video path:', videoPath);
   console.log('📊 File exists:', fsSync.existsSync(videoPath));
-  
+
   if (!fsSync.existsSync(videoPath)) {
     console.error('❌ Video not found:', videoPath);
     return res.status(404).json({ error: 'Video not found' });
@@ -426,7 +470,7 @@ app.get('/api/videos/stream/:videoId', (req, res) => {
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
     const chunksize = (end - start) + 1;
-    
+
     const file = fsSync.createReadStream(videoPath, { start, end });
     const head = {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
@@ -434,7 +478,7 @@ app.get('/api/videos/stream/:videoId', (req, res) => {
       'Content-Length': chunksize,
       'Content-Type': 'video/mp4',
     };
-    
+
     console.log('✅ Sending range:', `${start}-${end}/${fileSize}`);
     res.writeHead(206, head);
     file.pipe(res);
@@ -445,7 +489,7 @@ app.get('/api/videos/stream/:videoId', (req, res) => {
       'Content-Type': 'video/mp4',
       'Accept-Ranges': 'bytes'
     };
-    
+
     console.log('✅ Sending full video');
     res.writeHead(200, head);
     fsSync.createReadStream(videoPath).pipe(res);
@@ -455,10 +499,10 @@ app.get('/api/videos/stream/:videoId', (req, res) => {
 // Download video endpoint
 app.get('/api/videos/download/:videoId', (req, res) => {
   const videoPath = path.join(__dirname, 'output/videos', `${req.params.videoId}.mp4`);
-  
+
   console.log('⬇️  Download request:', req.params.videoId);
   console.log('📁 Path:', videoPath);
-  
+
   if (fsSync.existsSync(videoPath)) {
     const filename = `LearnAI_${req.params.videoId}.mp4`;
     console.log('✅ Sending file:', filename);
@@ -563,7 +607,7 @@ app.use((err, req, res, next) => {
 });
 
 app.use((req, res) => {
-  res.status(404).json({ 
+  res.status(404).json({
     error: 'Route not found',
     path: req.path,
     method: req.method
@@ -607,11 +651,11 @@ app.listen(PORT, () => {
   console.log('🚀 ================================');
   console.log(`🤖 AI: ${process.env.GOOGLE_GEMINI_API_KEY ? '✅ Gemini Enabled' : '⚠️  Simulation Mode'}`);
   console.log(`🎤 TTS: ${process.env.ELEVENLABS_API_KEY ? '✅ ElevenLabs Enabled' : '⚠️  Silent Mode'}`);
-  
+
   setTimeout(() => {
     console.log(`💾 Database: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '⚠️  Disconnected'}`);
   }, 2000);
-  
+
   console.log('🚀 ================================\n');
 });
 
