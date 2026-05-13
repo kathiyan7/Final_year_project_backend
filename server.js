@@ -15,6 +15,7 @@ const videoService = require('./services/videoService');
 
 const app = express();
 const PORT = process.env.PORT || 5005;
+const BASE_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
 // Middleware
 app.use(cors());
@@ -230,7 +231,7 @@ app.post('/api/generate/topic', async (req, res) => {
     console.log('✅ Video rendered successfully!');
 
     const duration = calculateDuration(script.totalDuration);
-    const videoUrl = `http://localhost:${PORT}/api/videos/stream/${videoResult.videoId}`;
+    const videoUrl = `${BASE_URL}/api/videos/stream/${videoResult.videoId}`;
     const processingTime = Date.now() - startTime;
     const estimatedCost = calculateCost(script, true, !!process.env.ELEVENLABS_API_KEY);
 
@@ -364,7 +365,7 @@ app.post('/api/generate/content', async (req, res) => {
     console.log('✅ Video rendered!');
 
     const duration = calculateDuration(script.totalDuration);
-    const videoUrl = `http://localhost:${PORT}/api/videos/stream/${videoResult.videoId}`;
+    const videoUrl = `${BASE_URL}/api/videos/stream/${videoResult.videoId}`;
     const processingTime = Date.now() - startTime;
     const estimatedCost = calculateCost(script, true, !!process.env.ELEVENLABS_API_KEY);
 
