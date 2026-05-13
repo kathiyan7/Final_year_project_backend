@@ -43,6 +43,16 @@ class VideoService {
     const outputPath = path.join(this.outputDir, `${videoId}.mp4`);
 
     try {
+      console.log('\n📹 Generating Stable Videos (SVD) in parallel...');
+      const svdPromises = script.scenes.map(async (scene) => {
+        const image = images.find(img => img.sceneId === scene.id);
+        if (!image?.path) return { sceneId: scene.id, path: null };
+        const path = await this.generateStableVideo(image.path, scene.id);
+        return { sceneId: scene.id, path };
+      });
+      const svdResults = await Promise.all(svdPromises);
+      console.log('✅ SVD Generation complete');
+
       console.log('\n📹 Creating video segments...');
       const segments = [];
       
@@ -50,6 +60,7 @@ class VideoService {
         const scene = script.scenes[i];
         const image = images.find(img => img.sceneId === scene.id);
         const audio = audioFiles.find(aud => aud.sceneId === scene.id);
+        const svdPath = svdResults.find(r => r.sceneId === scene.id)?.path;
 
         console.log(`\n  Scene ${scene.id}/${script.scenes.length}:`);
         console.log(`    Duration: ${scene.duration}s`);
@@ -61,7 +72,7 @@ class VideoService {
           continue;
         }
 
-        const segmentPath = await this.createSegment(scene, image.path, audio?.path, i, image.overlayPath);
+        const segmentPath = await this.createSegment(scene, image.path, audio?.path, i, image.overlayPath, svdPath);
         segments.push(segmentPath);
         
         console.log(`    ✅ Segment created`);
@@ -191,8 +202,7 @@ class VideoService {
     }
   }
 
-  async createSegment(scene, imagePath, audioPath, index, overlayPath) {
-    const svdVideoPath = await this.generateStableVideo(imagePath, scene.id);
+  async createSegment(scene, imagePath, audioPath, index, overlayPath, svdVideoPath) {
 
     return new Promise((resolve, reject) => {
       const segmentPath = path.join(this.tempDir, 'segments', `segment_${index}.mp4`);
@@ -232,7 +242,7 @@ class VideoService {
           '-map', '[v]',
           '-map', `${overlayPath && fsSync.existsSync(overlayPath) ? '2:a' : '1:a'}`,
           '-c:v libx264',
-          '-preset fast',
+          '-preset ultrafast',
           '-pix_fmt yuv420p',
           '-c:a aac',
           '-b:a 128k',
@@ -246,7 +256,7 @@ class VideoService {
         command.outputOptions([
           '-map', '[v]',
           '-c:v libx264',
-          '-preset fast',
+          '-preset ultrafast',
           '-pix_fmt yuv420p',
           '-an'
         ]);
