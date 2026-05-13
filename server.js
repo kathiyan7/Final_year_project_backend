@@ -80,6 +80,8 @@ const Video = mongoose.model('Video', VideoSchema);
 // HELPER FUNCTIONS
 // ============================================
 
+const memoryJobs = new Map();
+
 function calculateDuration(seconds) {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -136,7 +138,7 @@ app.post('/api/generate/topic', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    console.log('\n🎬 ===== VIDEO GENERATION STARTED =====');
+    console.log('\n🎬 ===== VIDEO GENERATION REQUEST STARTED =====');
     console.log('📝 Topic:', req.body.topic);
 
     const { topic } = req.body;
@@ -155,7 +157,7 @@ app.post('/api/generate/topic', async (req, res) => {
 
     // Check for existing video
     if (mongoose.connection.readyState === 1) {
-      // 1. Try case-insensitive exact match first (fastest)
+      // 1. Try case-insensitive exact match first
       let existingVideo = await Video.findOne({
         originalInput: { $regex: new RegExp(`^${topic}$`, 'i') },
         status: 'completed'
@@ -189,6 +191,7 @@ app.post('/api/generate/topic', async (req, res) => {
             duration: existingVideo.duration,
             thumbnail: existingVideo.thumbnailUrl,
             visuals: existingVideo.visuals,
+            status: 'completed',
             metadata: {
               ...existingVideo.metadata,
               createdAt: existingVideo.createdAt,
@@ -201,54 +204,93 @@ app.post('/api/generate/topic', async (req, res) => {
       }
     }
 
-    // Step 1: Research topic
-    console.log('\n🔍 Step 1/5: Researching topic with AI...');
-    await delay(500);
-    const researchData = await aiService.researchTopic(topic);
-    console.log('✅ Research complete:', researchData.keyPoints?.length || 0, 'key points');
-
-    // Step 2: Create script
-    console.log('\n📜 Step 2/5: Creating educational script...');
-    await delay(500);
-    const script = await aiService.createScript(researchData);
-    console.log('✅ Script complete:', script.scenes?.length || 0, 'scenes');
-
-    // Step 3: Generate images
-    console.log('\n🎨 Step 3/5: Generating scene images...');
-    await delay(500);
-    const images = await imageService.generateSceneImages(script);
-    console.log('✅ Images generated:', images.length);
-
-    // Step 4: Generate audio
-    console.log('\n🎤 Step 4/5: Generating voiceovers...');
-    await delay(500);
-    const audioFiles = await ttsService.generateAudioForScenes(script);
-    console.log('✅ Audio generated:', audioFiles.length);
-
-    // Step 5: Create video
-    console.log('\n🎬 Step 5/5: Rendering MP4 video with FFmpeg...');
-    const videoResult = await videoService.createVideo(script, images, audioFiles);
-    console.log('✅ Video rendered successfully!');
-
-    const duration = calculateDuration(script.totalDuration);
-    const videoUrl = `${BASE_URL}/api/videos/stream/${videoResult.videoId}`;
-    const processingTime = Date.now() - startTime;
-    const estimatedCost = calculateCost(script, true, !!process.env.ELEVENLABS_API_KEY);
-
-    // Save to database
+    // Create tracking record
+    let jobId = Date.now().toString() + Math.random().toString(36).substring(7);
     let savedVideo = null;
+    
     if (mongoose.connection.readyState === 1) {
       try {
         const video = new Video({
-          title: script.title || topic,
+          title: topic,
           inputType: 'topic',
           originalInput: topic,
+          status: 'processing',
+          thumbnailUrl: generateThumbnailUrl(topic)
+        });
+        savedVideo = await video.save();
+        jobId = savedVideo._id.toString();
+      } catch (dbError) {
+        console.error('⚠️  Database save failed:', dbError.message);
+      }
+    }
+    
+    if (!savedVideo) {
+      memoryJobs.set(jobId, {
+        _id: jobId,
+        title: topic,
+        inputType: 'topic',
+        originalInput: topic,
+        status: 'processing',
+        thumbnailUrl: generateThumbnailUrl(topic),
+        createdAt: new Date()
+      });
+    }
+
+    // Return EARLY response to frontend to prevent timeout
+    res.json({
+      success: true,
+      data: {
+        videoId: jobId,
+        status: 'processing',
+        message: 'Video generation started in background'
+      }
+    });
+
+    // BACKGROUND GENERATION PROCESS
+    (async () => {
+      try {
+        console.log(`\n⚙️ Background job [${jobId}] started for topic: ${topic}`);
+        // Step 1: Research topic
+        console.log('\n🔍 Step 1/5: Researching topic with AI...');
+        await delay(500);
+        const researchData = await aiService.researchTopic(topic);
+        console.log('✅ Research complete:', researchData.keyPoints?.length || 0, 'key points');
+
+        // Step 2: Create script
+        console.log('\n📜 Step 2/5: Creating educational script...');
+        await delay(500);
+        const script = await aiService.createScript(researchData);
+        console.log('✅ Script complete:', script.scenes?.length || 0, 'scenes');
+
+        // Step 3: Generate images
+        console.log('\n🎨 Step 3/5: Generating scene images...');
+        await delay(500);
+        const images = await imageService.generateSceneImages(script);
+        console.log('✅ Images generated:', images.length);
+
+        // Step 4: Generate audio
+        console.log('\n🎤 Step 4/5: Generating voiceovers...');
+        await delay(500);
+        const audioFiles = await ttsService.generateAudioForScenes(script);
+        console.log('✅ Audio generated:', audioFiles.length);
+
+        // Step 5: Create video
+        console.log('\n🎬 Step 5/5: Rendering MP4 video with FFmpeg...');
+        const videoResult = await videoService.createVideo(script, images, audioFiles);
+        console.log('✅ Video rendered successfully!');
+
+        const duration = calculateDuration(script.totalDuration);
+        const videoUrl = `${BASE_URL}/api/videos/stream/${videoResult.videoId}`;
+        const processingTime = Date.now() - startTime;
+        const estimatedCost = calculateCost(script, true, !!process.env.ELEVENLABS_API_KEY);
+
+        const finalData = {
+          title: script.title || topic,
           researchData: { overview: researchData.overview, keyPoints: researchData.keyPoints },
           script: script,
           visuals: images.map(img => ({ sceneId: img.sceneId, url: img.url })),
           videoUrl: videoUrl,
           videoPath: videoResult.path,
-          thumbnailUrl: generateThumbnailUrl(topic),
           status: 'completed',
           duration: duration,
           metadata: {
@@ -258,60 +300,48 @@ app.post('/api/generate/topic', async (req, res) => {
             processingTime: processingTime,
             estimatedCost: estimatedCost,
             fileSize: videoResult.size,
-            realVideo: true
+            realVideo: true,
+            videoId: jobId
           }
-        });
+        };
 
-        savedVideo = await video.save();
-        console.log('✅ Video saved to database');
-      } catch (dbError) {
-        console.error('⚠️  Database save failed:', dbError.message);
-      }
-    }
+        // Update database or memory
+        if (savedVideo) {
+          await Video.findByIdAndUpdate(jobId, finalData);
+          console.log(`✅ Background job [${jobId}] saved to database`);
+        } else {
+          memoryJobs.set(jobId, { ...memoryJobs.get(jobId), ...finalData });
+          console.log(`✅ Background job [${jobId}] saved to memory`);
+        }
 
-    // Cleanup temporary files
-    console.log('\n🧹 Cleaning up temporary files...');
-    await imageService.cleanup(images);
-    await ttsService.cleanup(audioFiles);
+        // Cleanup temporary files
+        console.log('\n🧹 Cleaning up temporary files...');
+        await imageService.cleanup(images);
+        await ttsService.cleanup(audioFiles);
 
-    console.log('\n🎉 ===== VIDEO GENERATION COMPLETED =====');
-    console.log(`⏱️  Total time: ${processingTime}ms`);
-    console.log(`📊 Stats: ${script.scenes.length} scenes, ${duration} duration`);
-    console.log(`💾 Size: ${(videoResult.size / (1024 * 1024)).toFixed(2)} MB`);
-    console.log(`💰 Estimated cost: $${estimatedCost}\n`);
-
-    res.json({
-      success: true,
-      data: {
-        topic: topic,
-        videoUrl: videoUrl,
-        videoPath: videoResult.path,
-        script: script,
-        duration: duration,
-        thumbnail: generateThumbnailUrl(topic),
-        visuals: images.map(img => ({ sceneId: img.sceneId, url: img.url })),
-        metadata: {
-          createdAt: new Date().toISOString(),
-          videoId: savedVideo?._id || videoResult.videoId,
-          aiPowered: !!process.env.GOOGLE_GEMINI_API_KEY,
-          processingTime: processingTime,
-          researchSummary: researchData.overview,
-          estimatedCost: estimatedCost,
-          fileSize: videoResult.size,
-          realVideo: true
+        console.log('\n🎉 ===== BACKGROUND JOB COMPLETED =====');
+      } catch (error) {
+        console.error('\n❌ ===== BACKGROUND GENERATION FAILED =====');
+        console.error('Error:', error.message);
+        
+        if (savedVideo) {
+          await Video.findByIdAndUpdate(jobId, { status: 'failed' });
+        } else {
+          const job = memoryJobs.get(jobId);
+          if (job) {
+            job.status = 'failed';
+            job.error = error.message;
+            memoryJobs.set(jobId, job);
+          }
         }
       }
-    });
+    })();
 
   } catch (error) {
-    console.error('\n❌ ===== VIDEO GENERATION FAILED =====');
-    console.error('Error:', error.message);
-    console.error('Stack:', error.stack);
-
+    console.error('\n❌ ===== REQUEST HANDLING FAILED =====');
     res.status(500).json({
-      error: 'Failed to generate video',
-      message: error.message,
-      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: 'Failed to initiate video generation',
+      message: error.message
     });
   }
 });
@@ -323,7 +353,7 @@ app.post('/api/generate/content', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    console.log('\n🎬 ===== CONTENT VIDEO GENERATION STARTED =====');
+    console.log('\n🎬 ===== CONTENT VIDEO REQUEST STARTED =====');
     console.log('📝 Content length:', req.body.content?.length, 'characters');
 
     const { content } = req.body;
@@ -340,43 +370,81 @@ app.post('/api/generate/content', async (req, res) => {
       return res.status(400).json({ error: 'Content too long (max 10,000 characters)' });
     }
 
-    console.log('\n🔍 Step 1/5: Analyzing content...');
-    await delay(500);
-    const analysis = await aiService.analyzeContent(content);
-    console.log('✅ Analysis complete');
-
-    console.log('\n📜 Step 2/5: Creating script...');
-    await delay(500);
-    const script = await aiService.createScriptFromContent(content, analysis);
-    console.log('✅ Script complete:', script.scenes?.length || 0, 'scenes');
-
-    console.log('\n🎨 Step 3/5: Generating images...');
-    await delay(500);
-    const images = await imageService.generateSceneImages(script);
-    console.log('✅ Images generated:', images.length);
-
-    console.log('\n🎤 Step 4/5: Generating audio...');
-    await delay(500);
-    const audioFiles = await ttsService.generateAudioForScenes(script);
-    console.log('✅ Audio generated');
-
-    console.log('\n🎬 Step 5/5: Rendering video...');
-    const videoResult = await videoService.createVideo(script, images, audioFiles);
-    console.log('✅ Video rendered!');
-
-    const duration = calculateDuration(script.totalDuration);
-    const videoUrl = `${BASE_URL}/api/videos/stream/${videoResult.videoId}`;
-    const processingTime = Date.now() - startTime;
-    const estimatedCost = calculateCost(script, true, !!process.env.ELEVENLABS_API_KEY);
-
-    // Save to database
+    // Create tracking record
+    let jobId = Date.now().toString() + Math.random().toString(36).substring(7);
     let savedVideo = null;
+    
     if (mongoose.connection.readyState === 1) {
       try {
         const video = new Video({
-          title: script.title || 'Custom Content Video',
+          title: 'Custom Content Video',
           inputType: 'content',
           originalInput: content.substring(0, 500),
+          status: 'processing',
+          thumbnailUrl: generateThumbnailUrl('Custom Content')
+        });
+        savedVideo = await video.save();
+        jobId = savedVideo._id.toString();
+      } catch (dbError) {
+        console.error('⚠️  Database save failed:', dbError.message);
+      }
+    }
+    
+    if (!savedVideo) {
+      memoryJobs.set(jobId, {
+        _id: jobId,
+        title: 'Custom Content Video',
+        inputType: 'content',
+        originalInput: content.substring(0, 500),
+        status: 'processing',
+        thumbnailUrl: generateThumbnailUrl('Custom Content'),
+        createdAt: new Date()
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        videoId: jobId,
+        status: 'processing',
+        message: 'Content video generation started in background'
+      }
+    });
+
+    // BACKGROUND TASK
+    (async () => {
+      try {
+        console.log('\n🔍 Step 1/5: Analyzing content...');
+        await delay(500);
+        const analysis = await aiService.analyzeContent(content);
+        console.log('✅ Analysis complete');
+
+        console.log('\n📜 Step 2/5: Creating script...');
+        await delay(500);
+        const script = await aiService.createScriptFromContent(content, analysis);
+        console.log('✅ Script complete:', script.scenes?.length || 0, 'scenes');
+
+        console.log('\n🎨 Step 3/5: Generating images...');
+        await delay(500);
+        const images = await imageService.generateSceneImages(script);
+        console.log('✅ Images generated:', images.length);
+
+        console.log('\n🎤 Step 4/5: Generating audio...');
+        await delay(500);
+        const audioFiles = await ttsService.generateAudioForScenes(script);
+        console.log('✅ Audio generated');
+
+        console.log('\n🎬 Step 5/5: Rendering video...');
+        const videoResult = await videoService.createVideo(script, images, audioFiles);
+        console.log('✅ Video rendered!');
+
+        const duration = calculateDuration(script.totalDuration);
+        const videoUrl = `${BASE_URL}/api/videos/stream/${videoResult.videoId}`;
+        const processingTime = Date.now() - startTime;
+        const estimatedCost = calculateCost(script, true, !!process.env.ELEVENLABS_API_KEY);
+
+        const finalData = {
+          title: script.title || 'Custom Content Video',
           script: script,
           visuals: images.map(img => ({ sceneId: img.sceneId, url: img.url })),
           videoUrl: videoUrl,
@@ -389,50 +457,44 @@ app.post('/api/generate/content', async (req, res) => {
             processingTime: processingTime,
             estimatedCost: estimatedCost,
             fileSize: videoResult.size,
-            realVideo: true
+            realVideo: true,
+            videoId: jobId
           }
-        });
+        };
 
-        savedVideo = await video.save();
-      } catch (dbError) {
-        console.error('⚠️  Database save failed:', dbError.message);
-      }
-    }
+        if (savedVideo) {
+          await Video.findByIdAndUpdate(jobId, finalData);
+          console.log(`✅ Background job [${jobId}] saved to database`);
+        } else {
+          memoryJobs.set(jobId, { ...memoryJobs.get(jobId), ...finalData });
+          console.log(`✅ Background job [${jobId}] saved to memory`);
+        }
 
-    // Cleanup
-    await imageService.cleanup(images);
-    await ttsService.cleanup(audioFiles);
+        await imageService.cleanup(images);
+        await ttsService.cleanup(audioFiles);
 
-    console.log('\n🎉 ===== CONTENT VIDEO COMPLETED =====');
-    console.log(`⏱️  Total time: ${processingTime}ms\n`);
-
-    res.json({
-      success: true,
-      data: {
-        videoUrl: videoUrl,
-        script: script,
-        duration: duration,
-        analysis: analysis,
-        thumbnail: generateThumbnailUrl('Custom Content'),
-        visuals: images.map(img => ({ sceneId: img.sceneId, url: img.url })),
-        metadata: {
-          createdAt: new Date().toISOString(),
-          videoId: savedVideo?._id || videoResult.videoId,
-          aiPowered: !!process.env.GOOGLE_GEMINI_API_KEY,
-          processingTime: processingTime,
-          estimatedCost: estimatedCost,
-          fileSize: videoResult.size,
-          realVideo: true
+        console.log('\n🎉 ===== CONTENT VIDEO COMPLETED =====');
+      } catch (error) {
+        console.error('\n❌ ===== CONTENT VIDEO FAILED =====');
+        console.error('Error:', error.message);
+        
+        if (savedVideo) {
+          await Video.findByIdAndUpdate(jobId, { status: 'failed' });
+        } else {
+          const job = memoryJobs.get(jobId);
+          if (job) {
+            job.status = 'failed';
+            job.error = error.message;
+            memoryJobs.set(jobId, job);
+          }
         }
       }
-    });
+    })();
 
   } catch (error) {
-    console.error('\n❌ ===== CONTENT VIDEO FAILED =====');
-    console.error('Error:', error.message);
-
+    console.error('\n❌ ===== REQUEST HANDLING FAILED =====');
     res.status(500).json({
-      error: 'Failed to generate video from content',
+      error: 'Failed to initiate video generation',
       message: error.message
     });
   }
@@ -533,11 +595,21 @@ app.get('/api/videos', async (req, res) => {
 
 app.get('/api/video/:id', async (req, res) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ error: 'Database not connected' });
+    let video = null;
+    
+    // Check Database First
+    if (mongoose.connection.readyState === 1) {
+      // Validate object ID format before querying
+      if (mongoose.Types.ObjectId.isValid(req.params.id)) {
+        video = await Video.findById(req.params.id);
+      }
     }
 
-    const video = await Video.findById(req.params.id);
+    // Fallback to memory store if not found in DB
+    if (!video) {
+      video = memoryJobs.get(req.params.id);
+    }
+
     if (!video) {
       return res.status(404).json({ error: 'Video not found' });
     }
